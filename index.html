@@ -43,6 +43,7 @@ h2.sec{font-size:21px;margin:22px 16px 10px;font-weight:800}
 .card .a{font-size:12px}
 .art{flex:none;display:grid;place-items:center;font-weight:800;color:#fff;background-size:cover;background-position:center;border-radius:4px;position:relative;overflow:hidden}
 .art.sm{width:48px;height:48px;font-size:20px}
+.art.round{border-radius:50%}
 .artc{width:100%;height:100%;font-size:48px;border-radius:0}
 .art svg{width:45%;height:45%}
 .meta{flex:1;min-width:0}
@@ -362,6 +363,7 @@ async function fetchLib() {
 function sanitizeLib(d) {
   const out = { v: 1, songs: {}, playlists: [] };
   if (d && typeof d.songs === "object" && d.songs) for (const [k, v] of Object.entries(d.songs)) if (v && typeof v === "object") out.songs[k] = v;
+  if (d && d.artists && typeof d.artists === "object") for (const [k, v] of Object.entries(d.artists)) if (typeof v === "string") out.artists = { ...(out.artists || {}), [k]: v };
   if (d && Array.isArray(d.playlists)) out.playlists = d.playlists.filter(p => p && p.id && typeof p.name === "string").map(p => ({ ...p, songs: Array.isArray(p.songs) ? p.songs.filter(x => typeof x === "string") : [] }));
   return out;
 }
@@ -490,9 +492,16 @@ function hydrateCovers(root = document) {
     loadCover(c).then(url => { if (url) { el.style.backgroundImage = `url('${url}')`; el.textContent = ""; el.removeAttribute("data-cover"); } });
   });
 }
-function artistArt(a) {
-  const k = imgIndex.get(nkey(a));
-  return k ? artHTML({ title: a, artist: a, cover: k }, "artc") : `<div class="art artc" style="background:${grad(a)}">${esc((a || "?")[0].toUpperCase())}</div>`;
+function artistCover(a) {
+  const own = lib.artists && lib.artists[a];
+  if (own && hasCover(own)) return own;
+  const k = imgIndex.get(nkey(a)); if (k) return k;
+  const s = sortRecent(allSongs.filter(x => x.artist === a && x.cover))[0];
+  return s ? s.cover : null;
+}
+function artistArt(a, cls = "artc") {
+  const k = artistCover(a);
+  return k ? artHTML({ title: a, artist: a, cover: k }, cls) : `<div class="art ${cls}" style="background:${grad(a)}">${esc((a || "?")[0].toUpperCase())}</div>`;
 }
 function plCoverHTML(key, cls) {
   if (key === "liked") return `<div class="art ${cls}" style="background:linear-gradient(135deg,#3a1c71,var(--acc))">${I.heartF}</div>`;
@@ -502,7 +511,8 @@ function plCoverHTML(key, cls) {
     const pl = lib.playlists.find(p => p.id === key.slice(3));
     if (pl) { const k = hasCover(pl.cover) ? pl.cover : imgIndex.get(nkey(pl.name)); if (k) return artHTML({ title: pl.name, artist: pl.name, cover: k }, cls); }
   }
-  if (key.startsWith("ar:") || key.startsWith("fd:")) { const k = imgIndex.get(nkey(key.slice(3))); if (k) return artHTML({ title: key.slice(3), artist: key.slice(3), cover: k }, cls); }
+  if (key.startsWith("ar:")) { const k = artistCover(key.slice(3)); if (k) return artHTML({ title: key.slice(3), artist: key.slice(3), cover: k }, cls + " round"); }
+  if (key.startsWith("fd:")) { const k = imgIndex.get(nkey(key.slice(3))); if (k) return artHTML({ title: key.slice(3), artist: key.slice(3), cover: k }, cls); }
   const songs = ctxSongs(key);
   const withCover = songs.find(s => s.cover && s.coverOwn) || songs.find(s => s.cover);
   if (withCover) return artHTML(withCover, cls);
@@ -569,19 +579,17 @@ function renderSearch() {
 }
 
 function renderLib() {
-  const f = prefs.libFilter || "all";
-  $("libPills").innerHTML = [["all", "Todo"], ["pl", "Playlists"], ["ar", "Artistas"], ["fd", "Carpetas"]].filter(([k]) => k !== "fd" || folders().length).map(([k, n]) => `<button class="pill ${f === k ? "on" : ""}" data-act="libfilter" data-f="${k}">${n}</button>`).join("");
+  const f = prefs.libFilter === "ar" ? "ar" : "pl";
+  $("libPills").innerHTML = [["pl", "Playlists"], ["ar", "Artistas"]].map(([k, n]) => `<button class="pill ${f === k ? "on" : ""}" data-act="libfilter" data-f="${k}">${n}</button>`).join("");
   if (!loaded) { $("libBody").innerHTML = ""; return; }
-  let rows = [];
-  if (f === "all" || f === "pl") {
-    rows.push(plRow("liked", "Playlist · " + nCanc(likedSongs().length)));
-    if (f === "all") rows.push(plRow("all", nCanc(allSongs.length)));
-    rows.push(...lib.playlists.map(p => plRow("pl:" + p.id, "Playlist · " + nCanc(plSongs(p).length))));
+  let html;
+  if (f === "ar") {
+    html = `<div class="list">` + artists().map(([a, n]) => `<div class="row" data-act="open" data-key="ar:${esc(a)}"><div style="width:56px;height:56px;border-radius:50%;overflow:hidden;flex:none">${artistArt(a)}</div><div class="meta"><div class="t">${esc(a)}</div><div class="a">Artista · ${nCanc(n)}</div></div></div>`).join("") + `</div>`;
+  } else {
+    const rows = [plRow("liked", "Playlist · " + nCanc(likedSongs().length)), plRow("all", nCanc(allSongs.length)),
+      ...lib.playlists.map(p => plRow("pl:" + p.id, "Playlist · " + nCanc(plSongs(p).length)))];
+    html = `<div class="list">` + rows.join("") + `<div class="row" data-act="newpl"><div class="art sm" style="background:#333">${I.plus}</div><div class="meta"><div class="t">Crear playlist</div></div></div></div>`;
   }
-  if (f === "ar" || f === "all") rows.push(...artists().map(([a, n]) => plRow("ar:" + a, "Artista · " + nCanc(n))));
-  if (f === "fd" || (f === "all")) rows.push(...folders().map(d => plRow("fd:" + d, "Carpeta · " + nCanc(allSongs.filter(s => s.folder === d).length))));
-  let html = `<div class="list">` + rows.join("") + `</div>`;
-  if (f === "pl" || f === "all") html += `<div class="list"><div class="row" data-act="newpl"><div class="art sm" style="background:#333">${I.plus}</div><div class="meta"><div class="t">Crear playlist</div></div></div></div>`;
   $("libBody").innerHTML = html; hydrateCovers($("libBody"));
 }
 
@@ -1278,14 +1286,14 @@ document.addEventListener("click", e => {
       })(); break;
     }
     case "armenu": {
-      const a = el.dataset.name; const has = !!imgIndex.get(nkey(a));
+      const a = el.dataset.name; const has = !!((lib.artists && lib.artists[a]) || imgIndex.get(nkey(a)));
       openSheet(`<div class="mhead"><div style="width:48px;height:48px;border-radius:50%;overflow:hidden">${artistArt(a)}</div><div class="meta"><div class="t">${esc(a)}</div><div class="a">Artista</div></div></div>` +
         mi("artimg", I.image, has ? "Cambiar foto del artista" : "Poner foto del artista", `data-name="${esc(a)}"`) + (has ? mi("artimgrm", I.minus, "Quitar foto del artista", `data-name="${esc(a)}"`) : "") +
         mi("playctx", I.play, "Reproducir", `data-key="ar:${esc(a)}"`));
       break;
     }
-    case "artimg": closeSheet(); if (!imgOk || !imgWrite) { toast(imgOk ? "Tu llave no permite escribir en el repositorio de imágenes." : "Para fotos de artistas, conecta el repositorio de imágenes en ⚙︎."); break; } pickImage({ type: "artist", name: el.dataset.name }); break;
-    case "artimgrm": closeSheet(); (async () => { const k = imgIndex.get(nkey(el.dataset.name)); if (k && await delImage(k)) { rebuild(); renderAll(); toast("Foto quitada"); } })(); break;
+    case "artimg": closeSheet(); pickImage({ type: "artist", name: el.dataset.name }); break;
+    case "artimgrm": closeSheet(); (async () => { const a = el.dataset.name; if (lib.artists && lib.artists[a]) mutate(l => { if (l.artists) delete l.artists[a]; }); else { const k = imgIndex.get(nkey(a)); if (k) await delImage(k); } rebuild(); renderAll(); toast("Foto quitada"); })(); break;
     case "plimg": closeSheet(); if (canWrite) pickImage({ type: "pl", id }); break;
     case "plimgrm": {
       closeSheet(); const pl = lib.playlists.find(p => p.id === id); if (!pl) break;
@@ -1345,14 +1353,13 @@ $("imgFile").addEventListener("change", async () => {
     const cb = await makeCover({ mime: f.type || "image/jpeg", data: new Uint8Array(await f.arrayBuffer()) });
     if (!cb) { toast("No se pudo leer esa imagen. Prueba con otra (JPG o PNG)."); return; }
     let cp;
-    if (imgOk && imgWrite) {
+    if (imgOk && imgWrite && t.type !== "artist") {
       // se guarda en el repositorio de imágenes con el nombre de la canción / playlist / artista
       const s0 = t.type === "song" && byPath.get(t.path);
       const pl0 = t.type === "pl" && lib.playlists.find(p => p.id === t.id);
       const name = t.type === "song" ? (s0.artist && s0.artist !== "Artista desconocido" ? `${s0.artist} - ${s0.title}` : s0.title) : t.type === "pl" ? pl0.name : t.name;
       cp = await putImage(cb, name);
     } else {
-      if (t.type === "artist") return;
       const hash = await sha1hex(new Uint8Array(await cb.arrayBuffer()));
       cp = `${COVER_DIR}/${hash}.jpg`;
       if (!coverSha[cp]) {
@@ -1363,7 +1370,7 @@ $("imgFile").addEventListener("change", async () => {
     }
     if (t.type === "song") mutate(l => { l.songs[t.path] = { ...(l.songs[t.path] || {}), cover: cp }; });
     else if (t.type === "pl") mutate(l => { const q = l.playlists.find(p => p.id === t.id); if (q) q.cover = cp; });
-    else { rebuild(); renderAll(); }
+    else mutate(l => { l.artists = { ...(l.artists || {}), [t.name]: cp }; });
     toast(t.type === "song" ? "Portada cambiada" : t.type === "pl" ? "Imagen de la playlist cambiada" : "Foto del artista cambiada");
     const s = t.type === "song" && current === t.path && byPath.get(t.path); if (s) setMediaSession(s);
   } catch(e) { toast("No se pudo subir la imagen: " + explain(e)); }
