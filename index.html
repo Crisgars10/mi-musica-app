@@ -43,6 +43,7 @@ h2.sec{font-size:21px;margin:22px 16px 10px;font-weight:800}
 .card .a{font-size:12px}
 .art{flex:none;display:grid;place-items:center;font-weight:800;color:#fff;background-size:cover;background-position:center;border-radius:4px;position:relative;overflow:hidden}
 .art.sm{width:48px;height:48px;font-size:20px}
+.artc{width:100%;height:100%;font-size:48px;border-radius:0}
 .art svg{width:45%;height:45%}
 .meta{flex:1;min-width:0}
 .t{font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -310,6 +311,30 @@ async function gh(path, opts = {}) {
   return r;
 }
 const repoPath = () => `/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}`;
+// --- repositorio de imágenes (opcional) ---
+const imgRepoPath = () => `/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.imgRepo)}`;
+const IMG_RE = /\.(jpe?g|png|webp|gif|heic|avif)$/i;
+let imgOk = false, imgWrite = false, imgErr = "", imgSha = {}, imgIndex = new Map();
+const nkey = s => norm(s).replace(/[^a-z0-9]+/g, " ").trim();
+const hasCover = k => !!k && (k.startsWith("i:") ? !!imgSha[k] : !!coverSha[k]);
+async function loadImgRepo() {
+  if (cfg.imgRepo === undefined) { cfg.imgRepo = "mi-musica-imagenes"; saveCfg(); }
+  imgOk = false; imgWrite = false; imgErr = ""; imgSha = {}; imgIndex = new Map();
+  if (!cfg.imgRepo) return;
+  try {
+    const info = await (await gh(imgRepoPath())).json();
+    imgWrite = !!(info.permissions && info.permissions.push);
+    let tree = [];
+    try { tree = (await (await gh(`${imgRepoPath()}/git/trees/${encodeURIComponent(info.default_branch || "main")}?recursive=1`)).json()).tree || []; }
+    catch(e) { if (e.status !== 409 && e.status !== 404) throw e; }
+    for (const x of tree) if (x.type === "blob" && IMG_RE.test(x.path)) {
+      const key = "i:" + x.path; imgSha[key] = x.sha;
+      const nm = nkey(x.path.split("/").pop().replace(/\.[^.]+$/, ""));
+      if (nm && !imgIndex.has(nm)) imgIndex.set(nm, key);
+    }
+    imgOk = true;
+  } catch(e) { imgErr = explain(e); }
+}
 const dirPrefix = () => (cfg.dir || "").replace(/^\/+|\/+$/g, "");
 function explain(e) {
   if (!navigator.onLine) return "Sin conexión a internet.";
@@ -386,7 +411,16 @@ function rebuild() {
     const m = lib.songs[f.path] || {};
     const g = guessMeta(f.path);
     const rel = f.path.slice(preS.length); const parts = rel.split("/");
-    const s = { path: f.path, sha: f.sha, size: f.size, title: m.title || g.title, artist: m.artist || g.artist, liked: !!m.liked, likedAt: m.likedAt || 0, added: m.added || 0, cover: m.cover && coverSha[m.cover] ? m.cover : null, folder: parts.length > 1 ? parts.slice(0, -1).join(" / ") : "" };
+    const title = m.title || g.title, artist = m.artist || g.artist;
+    const fileBase = f.path.split("/").pop().replace(/\.[^.]+$/, "");
+    // prioridad: imagen elegida en la app > imagen con el mismo nombre en el repo de imágenes > portada del MP3 > foto del artista
+    let cover = null, coverOwn = true;
+    const byName = imgIndex.get(nkey(artist + " - " + title)) || imgIndex.get(nkey(fileBase)) || imgIndex.get(nkey(title));
+    if (m.cover && m.cover.startsWith("i:") && hasCover(m.cover)) cover = m.cover;
+    else if (byName) cover = byName;
+    else if (m.cover && hasCover(m.cover)) cover = m.cover;
+    else { cover = imgIndex.get(nkey(artist)) || null; coverOwn = false; }
+    const s = { path: f.path, sha: f.sha, size: f.size, title, artist, liked: !!m.liked, likedAt: m.likedAt || 0, added: m.added || 0, cover, coverOwn: coverOwn && !!cover, folder: parts.length > 1 ? parts.slice(0, -1).join(" / ") : "" };
     byPath.set(f.path, s); return s;
   });
 }
@@ -433,8 +467,10 @@ async function pumpCovers() {
     const { path, res } = coverQ.shift(); coverActive++;
     (async () => {
       try {
-        const r = await gh(`${repoPath()}/git/blobs/${coverSha[path]}`, { accept: "application/vnd.github.raw" });
-        const url = URL.createObjectURL(new Blob([await r.arrayBuffer()], { type: "image/jpeg" }));
+        const isI = path.startsWith("i:");
+        const r = await gh(`${isI ? imgRepoPath() : repoPath()}/git/blobs/${isI ? imgSha[path] : coverSha[path]}`, { accept: "application/vnd.github.raw" });
+        const ext = path.split(".").pop().toLowerCase();
+        const url = URL.createObjectURL(new Blob([await r.arrayBuffer()], { type: ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : ext === "gif" ? "image/gif" : ext === "heic" ? "image/heic" : "image/jpeg" }));
         coverUrl.set(path, url); res(url);
       } catch(e) { res(null); }
       coverActive--; coverWait.delete(path); pumpCovers();
@@ -454,16 +490,21 @@ function hydrateCovers(root = document) {
     loadCover(c).then(url => { if (url) { el.style.backgroundImage = `url('${url}')`; el.textContent = ""; el.removeAttribute("data-cover"); } });
   });
 }
+function artistArt(a) {
+  const k = imgIndex.get(nkey(a));
+  return k ? artHTML({ title: a, artist: a, cover: k }, "artc") : `<div class="art artc" style="background:${grad(a)}">${esc((a || "?")[0].toUpperCase())}</div>`;
+}
 function plCoverHTML(key, cls) {
   if (key === "liked") return `<div class="art ${cls}" style="background:linear-gradient(135deg,#3a1c71,var(--acc))">${I.heartF}</div>`;
   if (key === "all") return `<div class="art ${cls}" style="background:linear-gradient(135deg,#1e2a4a,var(--acc2))">${I.note}</div>`;
   if (key === "recent") return `<div class="art ${cls}" style="background:linear-gradient(135deg,#e8115b,#f59b23)">${I.plus}</div>`;
   if (key.startsWith("pl:")) {
     const pl = lib.playlists.find(p => p.id === key.slice(3));
-    if (pl && pl.cover && coverSha[pl.cover]) return artHTML({ title: pl.name, artist: pl.name, cover: pl.cover }, cls);
+    if (pl) { const k = hasCover(pl.cover) ? pl.cover : imgIndex.get(nkey(pl.name)); if (k) return artHTML({ title: pl.name, artist: pl.name, cover: k }, cls); }
   }
+  if (key.startsWith("ar:") || key.startsWith("fd:")) { const k = imgIndex.get(nkey(key.slice(3))); if (k) return artHTML({ title: key.slice(3), artist: key.slice(3), cover: k }, cls); }
   const songs = ctxSongs(key);
-  const withCover = songs.find(s => s.cover);
+  const withCover = songs.find(s => s.cover && s.coverOwn) || songs.find(s => s.cover);
   if (withCover) return artHTML(withCover, cls);
   const name = ctxName(key);
   const icon = key.startsWith("fd:") ? I.folder : key.startsWith("ar:") ? I.user : I.note;
@@ -504,7 +545,7 @@ function renderHome() {
   const rec = sortRecent(allSongs).slice(0, 15);
   html += `<h2 class="sec">Añadidas recientemente</h2><div class="hscroll">` + rec.map((s, i) => `<div class="card" data-act="play" data-ctx="recent" data-i="${i}">${artHTML(s, "")}<div class="t" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(s.title)}</div><div class="a">${esc(s.artist)}</div></div>`).join("") + `</div>`;
   const ars = artists().slice(0, 12);
-  if (ars.length > 1) html += `<h2 class="sec">Tus artistas</h2><div class="hscroll">` + ars.map(([a, n]) => `<div class="card" data-act="open" data-key="ar:${esc(a)}"><div class="art" style="border-radius:50%;background:${grad(a)};font-size:48px;width:140px;height:140px">${esc(a[0].toUpperCase())}</div><div class="t" style="text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(a)}</div><div class="a" style="text-align:center">${nCanc(n)}</div></div>`).join("") + `</div>`;
+  if (ars.length > 1) html += `<h2 class="sec">Tus artistas</h2><div class="hscroll">` + ars.map(([a, n]) => `<div class="card" data-act="open" data-key="ar:${esc(a)}"><div style="width:140px;height:140px;border-radius:50%;overflow:hidden">${artistArt(a)}</div><div class="t" style="text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(a)}</div><div class="a" style="text-align:center">${nCanc(n)}</div></div>`).join("") + `</div>`;
   if (lib.playlists.length) html += `<h2 class="sec">Tus playlists</h2><div class="hscroll">` + lib.playlists.map(p => `<div class="card" data-act="open" data-key="pl:${esc(p.id)}">${plCoverHTML("pl:" + p.id, "")}<div class="t" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name)}</div><div class="a">${nCanc(plSongs(p).length)}</div></div>`).join("") + `</div>`;
   $("homeBody").innerHTML = html; hydrateCovers($("homeBody"));
 }
@@ -559,6 +600,7 @@ function renderDetail() {
     <div class="psub">${key.startsWith("ar:") ? "Artista · " : isPl ? "Playlist · " : ""}${nCanc(songs.length)} · ${mb.toFixed(1)} MB</div></div>
     <div class="pact">
       ${isPl ? `<button class="ib" data-act="plmenu" data-id="${esc(pl.id)}">${I.dots}</button>` : ""}
+      ${key.startsWith("ar:") ? `<button class="ib" data-act="armenu" data-name="${esc(key.slice(3))}">${I.dots}</button>` : ""}
       ${isPl ? `<button class="ib" data-act="addsongs" data-id="${esc(pl.id)}" title="Añadir canciones">${I.addpl}</button>` : ""}
       ${(isPl || key === "all") && canWrite ? `<button class="ib" data-act="upload" data-id="${isPl ? esc(pl.id) : ""}" title="Subir aquí">${I.upload}</button>` : ""}
       ${key === "all" ? `<button class="pill" data-act="sort">${sortMode() === "az" ? "A–Z" : "Recientes"}</button>` : ""}
@@ -742,7 +784,7 @@ function songMenu(path, key) {
   h += mi("playnext", I.next, "Reproducir a continuación", d);
   h += mi("addqueue", I.queue, "Añadir a la cola", d);
   h += mi("rename", I.edit, "Cambiar nombre", d);
-  if (canWrite) { h += mi("songimg", I.image, s.cover ? "Cambiar portada" : "Poner portada", d); if (s.cover) h += mi("songimgrm", I.minus, "Quitar portada", d); }
+  if (canWrite) { h += mi("songimg", I.image, s.coverOwn ? "Cambiar portada" : "Poner portada", d); if (s.coverOwn) h += mi("songimgrm", I.minus, "Quitar portada", d); }
   h += mi("open", I.user, "Ir al artista", `data-key="ar:${esc(s.artist)}"`);
   if (canWrite) h += mi("delsong", I.trash, "Borrar de GitHub", d, "danger");
   openSheet(h);
@@ -808,6 +850,8 @@ function settingsSheet(msg, bad) {
     <p>Tu música vive en un repositorio <b>privado</b>. La llave se guarda solo en este iPhone.</p>
     <label>Tu usuario de GitHub</label><input id="sOwner" autocapitalize="off" autocorrect="off" spellcheck="false" value="${esc(cfg.owner || "")}" placeholder="p. ej. Crisgars10">
     <label>Repositorio de la música</label><input id="sRepo" autocapitalize="off" autocorrect="off" spellcheck="false" value="${esc(cfg.repo || "mi-musica-privada")}">
+    <label>Repositorio de imágenes (opcional)</label><input id="sImg" autocapitalize="off" autocorrect="off" spellcheck="false" value="${esc(cfg.imgRepo ?? "mi-musica-imagenes")}" placeholder="déjalo vacío si no tienes">
+    ${cfg.token && cfg.imgRepo ? `<p style="margin-top:4px" class="${imgOk ? "" : "err"}">${imgOk ? `✓ Imágenes conectadas · ${Object.keys(imgSha).length} imágenes${imgWrite ? "" : " (solo lectura)"}` : esc(imgErr || "Sin conectar")}</p>` : ""}
     <label>Carpeta de la música</label><input id="sDir" autocapitalize="off" autocorrect="off" spellcheck="false" value="${esc(cfg.dir ?? "musica")}">
     <label>Llave (token) de GitHub</label><input id="sTok" type="password" autocapitalize="off" autocorrect="off" spellcheck="false" value="${esc(cfg.token || "")}" placeholder="github_pat_…">
     <label>Calidad al subir canciones</label>
@@ -825,7 +869,7 @@ function settingsSheet(msg, bad) {
   </div>`);
   $("sQ").value = String(cfg.q ?? 96);
   $("sSave").onclick = async () => {
-    const n = { owner: $("sOwner").value.trim(), repo: $("sRepo").value.trim(), dir: $("sDir").value.trim().replace(/^\/+|\/+$/g, ""), token: $("sTok").value.trim(), q: +$("sQ").value };
+    const n = { owner: $("sOwner").value.trim(), repo: $("sRepo").value.trim(), imgRepo: $("sImg").value.trim(), dir: $("sDir").value.trim().replace(/^\/+|\/+$/g, ""), token: $("sTok").value.trim(), q: +$("sQ").value };
     if (!n.owner || !n.repo || !n.token) { $("sMsg").textContent = "Rellena usuario, repositorio y llave."; $("sMsg").className = "err"; return; }
     const old = cfg; cfg = n; $("sMsg").textContent = "Comprobando…"; $("sMsg").className = "";
     try { await gh(repoPath()); saveCfg(); closeSheet(); urlCache.clear(); load(); }
@@ -852,9 +896,10 @@ async function load() {
     files = tree.filter(x => x.type === "blob" && AUDIO_RE.test(x.path) && x.path.startsWith(preS)).map(x => ({ path: x.path, sha: x.sha, size: x.size || 0 }));
     coverSha = {}; totalBytes = 0;
     for (const x of tree) if (x.type === "blob") { totalBytes += x.size || 0; if (x.path.startsWith(COVER_DIR + "/")) coverSha[x.path] = x.sha; }
+    await loadImgRepo();
     const r = await fetchLib();
     if (!pendingMuts.length) { lib = r.lib; libSha = r.sha; }
-    loaded = true; rebuild();
+    loaded = true; rebuild(); setTimeout(scanMeta, 300);
     upmsg(!repoPrivate ? "⚠️ Tu repositorio es PÚBLICO: cualquiera puede ver tu música. Hazlo privado en GitHub." : r.broken ? "El archivo mimusica.json estaba dañado; se ha empezado uno nuevo." : canWrite ? "" : "Modo solo escuchar: la llave no permite cambios.", !repoPrivate || r.broken);
     renderAll();
   } catch(e) {
@@ -914,6 +959,69 @@ async function makeCover(pic) {
     c.getContext("2d").drawImage(bmp, (S - w) / 2, (S - h) / 2, w, h);
     return await new Promise(r => c.toBlob(r, "image/jpeg", 0.82));
   } catch(e) { return null; }
+}
+// ---------- datos de M4A (título, artista y portada) ----------
+function readMP4(u8) {
+  const out = {};
+  try {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const typ = p => String.fromCharCode(u8[p], u8[p + 1], u8[p + 2], u8[p + 3]);
+    const boxes = (start, end) => { const r = []; let p = start; while (p + 8 <= end) { let size = dv.getUint32(p), hdr = 8; const t = typ(p + 4); if (size === 1) { size = Number(dv.getBigUint64(p + 8)); hdr = 16; } else if (size === 0) size = end - p; if (size < hdr || p + size > end) break; r.push({ t, s: p + hdr, e: p + size }); p += size; } return r; };
+    const find = (list, t) => list.find(b => b.t === t);
+    const moov = find(boxes(0, u8.length), "moov"); if (!moov) return out;
+    const udta = find(boxes(moov.s, moov.e), "udta"); if (!udta) return out;
+    const meta = find(boxes(udta.s, udta.e), "meta"); if (!meta) return out;
+    const ilst = find(boxes(meta.s + 4, meta.e), "ilst"); if (!ilst) return out;
+    for (const it of boxes(ilst.s, ilst.e)) {
+      const d = find(boxes(it.s, it.e), "data"); if (!d) continue;
+      const kind = dv.getUint32(d.s) & 0xffffff, val = u8.subarray(d.s + 8, d.e);
+      const key = it.t;
+      if (key === "\u00a9nam") out.title = new TextDecoder().decode(val).trim();
+      else if (key === "\u00a9ART" || (key === "aART" && !out.artist)) out.artist = new TextDecoder().decode(val).trim();
+      else if (key === "covr" && !out.pic) out.pic = { mime: kind === 14 ? "image/png" : "image/jpeg", data: val.slice() };
+    }
+  } catch(e) {}
+  return out;
+}
+const readTags = (u8, name) => /\.(m4a|mp4|aac|alac)$/i.test(name) ? readMP4(u8) : readID3(u8);
+async function storeCover(pic) {
+  const cb = await makeCover(pic); if (!cb) return null;
+  const hash = await sha1hex(new Uint8Array(await cb.arrayBuffer()));
+  const cp = `${COVER_DIR}/${hash}.jpg`;
+  if (!coverSha[cp]) {
+    const j = await (await gh(`${repoPath()}/contents/${encPath(cp)}`, { method: "PUT", body: JSON.stringify({ message: "Portada", content: await blobToB64(cb) }) })).json();
+    coverSha[cp] = j.content.sha; totalBytes += cb.size;
+  }
+  if (!coverUrl.has(cp)) coverUrl.set(cp, URL.createObjectURL(cb));
+  return cp;
+}
+
+// ---------- leer datos de canciones subidas directamente en github.com ----------
+let scanning = false;
+async function scanMeta() {
+  if (scanning || !canWrite) return;
+  const todo = allSongs.filter(s => /\.(mp3|m4a|mp4|aac)$/i.test(s.path) && !(lib.songs[s.path] && lib.songs[s.path].scanned));
+  if (!todo.length) return;
+  scanning = true; let n = 0;
+  for (const s of todo) {
+    n++; upmsg(`Leyendo portadas y nombres ${n}/${todo.length}…`);
+    try {
+      const r = await gh(`${repoPath()}/git/blobs/${s.sha}`, { accept: "application/vnd.github.raw" });
+      const u8 = new Uint8Array(await r.arrayBuffer());
+      const tags = readTags(u8, s.path);
+      let cp = null;
+      if (tags.pic) cp = await storeCover(tags.pic).catch(() => null);
+      mutate(l => {
+        const m = l.songs[s.path] || {};
+        l.songs[s.path] = { ...m, scanned: true,
+          ...(!m.title && tags.title ? { title: tags.title } : {}),
+          ...(!m.artist && tags.artist ? { artist: tags.artist } : {}),
+          ...(!m.cover && cp ? { cover: cp } : {}),
+          ...(!m.added ? { added: Date.now() - n } : {}) };
+      });
+    } catch(e) { if (e.status === 401 || e.status === 403) break; }
+  }
+  scanning = false; upmsg("");
 }
 async function sha1hex(u8) { try { const d = await crypto.subtle.digest("SHA-1", u8); return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 16); } catch(e) { return uid(); } }
 
@@ -1050,8 +1158,9 @@ $("file").addEventListener("change", async () => {
     const f = list[i];
     const setBar = p => bar.style.width = ((i + p) / list.length * 100) + "%";
     try {
-      const head = new Uint8Array(await f.slice(0, Math.min(f.size, 4 * 1048576)).arrayBuffer());
-      const tags = readID3(head);
+      const isMp4 = /\.(m4a|mp4|aac|alac)$/i.test(f.name);
+      const head = new Uint8Array(await (isMp4 ? f : f.slice(0, Math.min(f.size, 4 * 1048576))).arrayBuffer());
+      const tags = readTags(head, f.name);
       const g = guessMeta(f.name);
       const title = tags.title || g.title, artist = tags.artist || g.artist;
       let blob = f, ext = (f.name.split(".").pop() || "mp3").toLowerCase();
@@ -1082,7 +1191,7 @@ $("file").addEventListener("change", async () => {
       const j = await (await gh(`${repoPath()}/contents/${encPath(path)}`, { method: "PUT", body: JSON.stringify({ message: "Añadir " + base, content: await blobToB64(blob) }) })).json();
       files.push({ path, sha: j.content.sha, size: j.content.size || blob.size }); totalBytes += blob.size;
       const added = Date.now();
-      mutate(l => { l.songs[path] = { ...(l.songs[path] || {}), title, artist, added, ...(coverPath ? { cover: coverPath } : {}) }; if (plId) { const pl = l.playlists.find(p => p.id === plId); if (pl && !pl.songs.includes(path)) pl.songs.push(path); } });
+      mutate(l => { l.songs[path] = { ...(l.songs[path] || {}), title, artist, added, scanned: true, ...(coverPath ? { cover: coverPath } : {}) }; if (plId) { const pl = l.playlists.find(p => p.id === plId); if (pl && !pl.songs.includes(path)) pl.songs.push(path); } });
       ok++; setBar(1);
     } catch(e) { toast(`Error con ${f.name}: ${explain(e)}`); await sleep(1500); }
   }
@@ -1099,7 +1208,7 @@ document.addEventListener("click", e => {
   switch (act) {
     case "play": { unlockAudio(); startCtx(el.dataset.ctx, +el.dataset.i); break; }
     case "playctx": {
-      unlockAudio();
+      closeSheet(); unlockAudio();
       if (ctx.key === key && current) { au.paused ? au.play().catch(() => {}) : au.pause(); }
       else startCtx(key, shuffle ? -1 : 0);
       break;
@@ -1156,14 +1265,36 @@ document.addEventListener("click", e => {
     case "plmenu": {
       const pl = lib.playlists.find(p => p.id === id);
       openSheet(`<div class="mhead">${plCoverHTML("pl:" + id, "sm")}<div class="meta"><div class="t">${esc(pl.name)}</div><div class="a">${nCanc(plSongs(pl).length)}</div></div></div>` +
-        mi("addsongs", I.addpl, "Añadir canciones", `data-id="${esc(id)}"`) + mi("renpl", I.edit, "Cambiar nombre", `data-id="${esc(id)}"`) + mi("plimg", I.image, pl.cover ? "Cambiar imagen" : "Poner imagen", `data-id="${esc(id)}"`) + (pl.cover ? mi("plimgrm", I.minus, "Quitar imagen", `data-id="${esc(id)}"`) : "") +
+        mi("addsongs", I.addpl, "Añadir canciones", `data-id="${esc(id)}"`) + mi("renpl", I.edit, "Cambiar nombre", `data-id="${esc(id)}"`) + mi("plimg", I.image, (hasCover(pl.cover) || imgIndex.get(nkey(pl.name))) ? "Cambiar imagen" : "Poner imagen", `data-id="${esc(id)}"`) + ((hasCover(pl.cover) || imgIndex.get(nkey(pl.name))) ? mi("plimgrm", I.minus, "Quitar imagen", `data-id="${esc(id)}"`) : "") +
         mi("addqueuepl", I.queue, "Añadir a la cola", `data-id="${esc(id)}"`) + mi("delpl", I.trash, "Borrar playlist", `data-id="${esc(id)}"`, "danger"));
       break;
     }
     case "songimg": closeSheet(); pickImage({ type: "song", path }); break;
-    case "songimgrm": closeSheet(); mutate(l => { l.songs[path] = { ...(l.songs[path] || {}), cover: null }; }); toast("Portada quitada"); break;
+    case "songimgrm": {
+      closeSheet(); const s = byPath.get(path); if (!s) break;
+      (async () => {
+        if (s.cover && s.cover.startsWith("i:")) { const ok = await delImage(s.cover); if (!ok) return; }
+        mutate(l => { l.songs[path] = { ...(l.songs[path] || {}), cover: null }; }); toast("Portada quitada");
+      })(); break;
+    }
+    case "armenu": {
+      const a = el.dataset.name; const has = !!imgIndex.get(nkey(a));
+      openSheet(`<div class="mhead"><div style="width:48px;height:48px;border-radius:50%;overflow:hidden">${artistArt(a)}</div><div class="meta"><div class="t">${esc(a)}</div><div class="a">Artista</div></div></div>` +
+        mi("artimg", I.image, has ? "Cambiar foto del artista" : "Poner foto del artista", `data-name="${esc(a)}"`) + (has ? mi("artimgrm", I.minus, "Quitar foto del artista", `data-name="${esc(a)}"`) : "") +
+        mi("playctx", I.play, "Reproducir", `data-key="ar:${esc(a)}"`));
+      break;
+    }
+    case "artimg": closeSheet(); if (!imgOk || !imgWrite) { toast(imgOk ? "Tu llave no permite escribir en el repositorio de imágenes." : "Para fotos de artistas, conecta el repositorio de imágenes en ⚙︎."); break; } pickImage({ type: "artist", name: el.dataset.name }); break;
+    case "artimgrm": closeSheet(); (async () => { const k = imgIndex.get(nkey(el.dataset.name)); if (k && await delImage(k)) { rebuild(); renderAll(); toast("Foto quitada"); } })(); break;
     case "plimg": closeSheet(); if (canWrite) pickImage({ type: "pl", id }); break;
-    case "plimgrm": closeSheet(); mutate(l => { const q = l.playlists.find(p => p.id === id); if (q) delete q.cover; }); toast("Imagen quitada"); break;
+    case "plimgrm": {
+      closeSheet(); const pl = lib.playlists.find(p => p.id === id); if (!pl) break;
+      (async () => {
+        const k = hasCover(pl.cover) ? pl.cover : imgIndex.get(nkey(pl.name));
+        if (k && k.startsWith("i:")) { const ok = await delImage(k); if (!ok) return; }
+        mutate(l => { const q = l.playlists.find(p => p.id === id); if (q) delete q.cover; }); toast("Imagen quitada");
+      })(); break;
+    }
     case "renpl": { const pl = lib.playlists.find(p => p.id === id); promptSheet({ title: "Cambiar nombre de la playlist", fields: [{ label: "Nombre", value: pl.name }], ok: "Guardar", onOk: ([n]) => { if (!n) return false; mutate(l => { const q = l.playlists.find(p => p.id === id); if (q) q.name = n; }); } }); break; }
     case "delpl": { const pl = lib.playlists.find(p => p.id === id); confirmSheet("¿Borrar playlist?", `Se borrará la playlist <b>${esc(pl.name)}</b>. Las canciones siguen en tu biblioteca.`, "Borrar", () => { mutate(l => { l.playlists = l.playlists.filter(p => p.id !== id); }); detailKey = null; setTab("lib"); toast("Playlist borrada"); }); break; }
     case "addqueuepl": { const pl = lib.playlists.find(p => p.id === id); closeSheet(); unlockAudio(); const ps = plSongs(pl).map(s => s.path); if (!current) startCtx("pl:" + id, 0); else { upNext.push(...ps); toast("Añadida a la cola"); } break; }
@@ -1185,6 +1316,25 @@ document.addEventListener("click", e => {
 });
 // ---------- imágenes propias (portadas de canciones y playlists) ----------
 let imgTarget = null;
+async function putImage(cb, name) {
+  const path = safeName(name) + ".jpg", key = "i:" + path;
+  const body = { message: "Imagen " + name, content: await blobToB64(cb) };
+  if (imgSha[key]) body.sha = imgSha[key];
+  const j = await (await gh(`${imgRepoPath()}/contents/${encPath(path)}`, { method: "PUT", body: JSON.stringify(body) })).json();
+  imgSha[key] = j.content.sha; imgIndex.set(nkey(name), key);
+  if (coverUrl.has(key)) URL.revokeObjectURL(coverUrl.get(key));
+  coverUrl.set(key, URL.createObjectURL(cb));
+  return key;
+}
+async function delImage(key) {
+  if (!imgWrite) { toast("Tu llave no permite borrar en el repositorio de imágenes."); return false; }
+  try {
+    const path = key.slice(2);
+    await gh(`${imgRepoPath()}/contents/${encPath(path)}`, { method: "DELETE", body: JSON.stringify({ message: "Quitar imagen", sha: imgSha[key] }) });
+    delete imgSha[key]; for (const [n, k] of imgIndex) if (k === key) imgIndex.delete(n);
+    return true;
+  } catch(e) { toast("No se pudo quitar: " + explain(e)); return false; }
+}
 function pickImage(t) { if (!canWrite) { toast("Tu llave no permite cambios."); return; } imgTarget = t; $("imgFile").click(); }
 $("imgFile").addEventListener("change", async () => {
   const f = $("imgFile").files[0]; $("imgFile").value = "";
@@ -1194,16 +1344,27 @@ $("imgFile").addEventListener("change", async () => {
   try {
     const cb = await makeCover({ mime: f.type || "image/jpeg", data: new Uint8Array(await f.arrayBuffer()) });
     if (!cb) { toast("No se pudo leer esa imagen. Prueba con otra (JPG o PNG)."); return; }
-    const hash = await sha1hex(new Uint8Array(await cb.arrayBuffer()));
-    const cp = `${COVER_DIR}/${hash}.jpg`;
-    if (!coverSha[cp]) {
-      const j = await (await gh(`${repoPath()}/contents/${encPath(cp)}`, { method: "PUT", body: JSON.stringify({ message: "Imagen", content: await blobToB64(cb) }) })).json();
-      coverSha[cp] = j.content.sha; totalBytes += cb.size;
+    let cp;
+    if (imgOk && imgWrite) {
+      // se guarda en el repositorio de imágenes con el nombre de la canción / playlist / artista
+      const s0 = t.type === "song" && byPath.get(t.path);
+      const pl0 = t.type === "pl" && lib.playlists.find(p => p.id === t.id);
+      const name = t.type === "song" ? (s0.artist && s0.artist !== "Artista desconocido" ? `${s0.artist} - ${s0.title}` : s0.title) : t.type === "pl" ? pl0.name : t.name;
+      cp = await putImage(cb, name);
+    } else {
+      if (t.type === "artist") return;
+      const hash = await sha1hex(new Uint8Array(await cb.arrayBuffer()));
+      cp = `${COVER_DIR}/${hash}.jpg`;
+      if (!coverSha[cp]) {
+        const j = await (await gh(`${repoPath()}/contents/${encPath(cp)}`, { method: "PUT", body: JSON.stringify({ message: "Imagen", content: await blobToB64(cb) }) })).json();
+        coverSha[cp] = j.content.sha; totalBytes += cb.size;
+      }
+      if (!coverUrl.has(cp)) coverUrl.set(cp, URL.createObjectURL(cb));
     }
-    if (!coverUrl.has(cp)) coverUrl.set(cp, URL.createObjectURL(cb));
     if (t.type === "song") mutate(l => { l.songs[t.path] = { ...(l.songs[t.path] || {}), cover: cp }; });
-    else mutate(l => { const q = l.playlists.find(p => p.id === t.id); if (q) q.cover = cp; });
-    toast(t.type === "song" ? "Portada cambiada" : "Imagen de la playlist cambiada");
+    else if (t.type === "pl") mutate(l => { const q = l.playlists.find(p => p.id === t.id); if (q) q.cover = cp; });
+    else { rebuild(); renderAll(); }
+    toast(t.type === "song" ? "Portada cambiada" : t.type === "pl" ? "Imagen de la playlist cambiada" : "Foto del artista cambiada");
     const s = t.type === "song" && current === t.path && byPath.get(t.path); if (s) setMediaSession(s);
   } catch(e) { toast("No se pudo subir la imagen: " + explain(e)); }
 });
