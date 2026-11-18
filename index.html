@@ -554,6 +554,8 @@ function renderHome() {
   let html = `<div class="grid">` + tiles.map(([k]) => `<div class="tile" data-act="open" data-key="${esc(k)}">${plCoverHTML(k, "")}<span>${esc(ctxName(k))}</span></div>`).join("") + `</div>`;
   const rec = sortRecent(allSongs).slice(0, 15);
   html += `<h2 class="sec">Añadidas recientemente</h2><div class="hscroll">` + rec.map((s, i) => `<div class="card" data-act="play" data-ctx="recent" data-i="${i}">${artHTML(s, "")}<div class="t" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(s.title)}</div><div class="a">${esc(s.artist)}</div></div>`).join("") + `</div>`;
+  const ars = artists().slice(0, 12);
+  if (ars.length > 1) html += `<h2 class="sec">Tus artistas</h2><div class="hscroll">` + ars.map(([a, n]) => `<div class="card" data-act="open" data-key="ar:${esc(a)}"><div style="width:140px;height:140px;border-radius:50%;overflow:hidden">${artistArt(a)}</div><div class="t" style="text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(a)}</div><div class="a" style="text-align:center">${nCanc(n)}</div></div>`).join("") + `</div>`;
   if (lib.playlists.length) html += `<h2 class="sec">Tus playlists</h2><div class="hscroll">` + lib.playlists.map(p => `<div class="card" data-act="open" data-key="pl:${esc(p.id)}">${plCoverHTML("pl:" + p.id, "")}<div class="t" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name)}</div><div class="a">${nCanc(plSongs(p).length)}</div></div>`).join("") + `</div>`;
   $("homeBody").innerHTML = html; hydrateCovers($("homeBody"));
 }
@@ -564,12 +566,12 @@ function renderSearch() {
   if (!q) {
     searchResults = [];
     $("searchBody").innerHTML = allSongs.length ? `<h2 class="sec" style="font-size:16px">Explorar</h2><div class="grid">` +
-      [["all"], ["liked"], ["recent"], ...lib.playlists.slice(0, 5).map(p => ["pl:" + p.id])].map(([k]) => `<div class="tile" data-act="open" data-key="${esc(k)}" style="background:${grad(ctxName(k))};height:80px;padding-left:12px;font-size:15px"><span>${esc(ctxName(k))}</span></div>`).join("") + `</div>` : "";
+      [["all"], ["liked"], ["recent"], ...artists().slice(0, 5).map(([a]) => ["ar:" + a])].map(([k]) => `<div class="tile" data-act="open" data-key="${esc(k)}" style="background:${grad(ctxName(k))};height:80px;padding-left:12px;font-size:15px"><span>${esc(ctxName(k))}</span></div>`).join("") + `</div>` : "";
     return;
   }
   searchResults = sortAZ(allSongs.filter(s => norm(s.title + " " + s.artist).includes(q)));
   const pls = lib.playlists.filter(p => norm(p.name).includes(q));
-  const ars = [];
+  const ars = artists().filter(([a]) => norm(a).includes(q)).slice(0, 5);
   let html = "";
   if (ars.length || pls.length) html += `<div class="list">` + ars.map(([a, n]) => plRow("ar:" + a, "Artista · " + nCanc(n))).join("") + pls.map(p => plRow("pl:" + p.id, "Playlist · " + nCanc(plSongs(p).length))).join("") + `</div>`;
   html += searchResults.length ? `<div class="list">` + searchResults.map((s, i) => songRow(s, i, "search")).join("") + `</div>` : (html ? "" : `<div class="empty">No hay resultados para “${esc($("q").value)}”.</div>`);
@@ -577,12 +579,18 @@ function renderSearch() {
 }
 
 function renderLib() {
-  $("libPills").innerHTML = "";
+  const f = prefs.libFilter === "ar" ? "ar" : "pl";
+  $("libPills").innerHTML = [["pl", "Playlists"], ["ar", "Artistas"]].map(([k, n]) => `<button class="pill ${f === k ? "on" : ""}" data-act="libfilter" data-f="${k}">${n}</button>`).join("");
   if (!loaded) { $("libBody").innerHTML = ""; return; }
-  const rows = [plRow("liked", "Playlist · " + nCanc(likedSongs().length)), plRow("all", nCanc(allSongs.length)),
-    ...lib.playlists.map(p => plRow("pl:" + p.id, "Playlist · " + nCanc(plSongs(p).length)))];
-  $("libBody").innerHTML = `<div class="list">` + rows.join("") + `<div class="row" data-act="newpl"><div class="art sm" style="background:#333">${I.plus}</div><div class="meta"><div class="t">Crear playlist</div></div></div></div>`;
-  hydrateCovers($("libBody"));
+  let html;
+  if (f === "ar") {
+    html = `<div class="list">` + artists().map(([a, n]) => `<div class="row" data-act="open" data-key="ar:${esc(a)}"><div style="width:56px;height:56px;border-radius:50%;overflow:hidden;flex:none">${artistArt(a)}</div><div class="meta"><div class="t">${esc(a)}</div><div class="a">Artista · ${nCanc(n)}</div></div></div>`).join("") + `</div>`;
+  } else {
+    const rows = [plRow("liked", "Playlist · " + nCanc(likedSongs().length)), plRow("all", nCanc(allSongs.length)),
+      ...lib.playlists.map(p => plRow("pl:" + p.id, "Playlist · " + nCanc(plSongs(p).length)))];
+    html = `<div class="list">` + rows.join("") + `<div class="row" data-act="newpl"><div class="art sm" style="background:#333">${I.plus}</div><div class="meta"><div class="t">Crear playlist</div></div></div></div>`;
+  }
+  $("libBody").innerHTML = html; hydrateCovers($("libBody"));
 }
 
 function renderDetail() {
@@ -785,6 +793,7 @@ function songMenu(path, key) {
   h += mi("addqueue", I.queue, "Añadir a la cola", d);
   h += mi("rename", I.edit, "Cambiar nombre", d);
   if (canWrite) { h += mi("songimg", I.image, s.coverOwn ? "Cambiar portada" : "Poner portada", d); if (s.coverOwn) h += mi("songimgrm", I.minus, "Quitar portada", d); }
+  h += mi("open", I.user, "Ir al artista", `data-key="ar:${esc(s.artist)}"`);
   if (canWrite) h += mi("delsong", I.trash, "Borrar de GitHub", d, "danger");
   openSheet(h);
 }
